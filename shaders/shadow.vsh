@@ -1,6 +1,8 @@
 #version 330 compatibility
 
-#include "/lib/distort.glsl"
+vec3 distortShadowClipPos(vec3 shadowClipPos) {
+    return vec3(shadowClipPos.x, shadowClipPos.y, shadowClipPos.z * 0.2 + 0.8) * 0.96 + 0.02;
+}
 
 out vec2 texcoord;
 out vec4 glcolor;

@@ -1,6 +1,18 @@
 #version 330 compatibility
 
-#include "/lib/common.glsl"
+#ifndef STYLE_STRENGTH
+#define STYLE_STRENGTH 0.65
+#endif
+#ifndef BLOOM_STRENGTH
+#define BLOOM_STRENGTH 0.18
+#endif
+
+vec3 applyVerdantGrade(vec3 color) {
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    vec3 saturated = mix(vec3(luma), color, 1.0 + 0.12 * STYLE_STRENGTH);
+    vec3 lifted = saturated + vec3(0.01, 0.018, 0.012) * STYLE_STRENGTH;
+    return max(lifted, vec3(0.0));
+}
 
 uniform sampler2D colortex0;
 uniform float viewWidth;

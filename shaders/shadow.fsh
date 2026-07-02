@@ -1,6 +1,9 @@
 #version 330 compatibility
 
-#include "/lib/distort.glsl"
+// Shadow distortion
+vec3 distortShadowClipPos(vec3 shadowClipPos) {
+    return vec3(shadowClipPos.x, shadowClipPos.y, shadowClipPos.z * 0.2 + 0.8) * 0.96 + 0.02;
+}
 
 uniform sampler2D gtexture;
 
