@@ -1,18 +1,13 @@
-#version 120
+#version 330 compatibility
 
-#if defined IRIS_FEATURE_ENTITY_TRANSLUCENT && !defined IS_IRIS
-#define OLD
-#include "/lib/iris_required.glsl"
-#elif !defined IS_IRIS
-#include "/lib/iris_required.glsl"
-#else
-uniform sampler2D texture;
+uniform sampler2D colortex0;
 
-varying vec4 color;
-varying vec2 coord0;
+in vec2 texcoord;
 
-void main()
-{
-    gl_FragData[0] = color * texture2D(texture,coord0);
+/* RENDERTARGETS: 0 */
+layout(location = 0) out vec4 color;
+
+void main() {
+    color = texture(colortex0, texcoord);
+    color.rgb = pow(max(color.rgb, vec3(0.0)), vec3(1.0 / 2.2));
 }
-#endif
