@@ -33,6 +33,22 @@
 #define FOG_DENSITY 5.0 // [1.0 2.5 5.0 8.0 12.0]
 #endif
 
+// Uniforms
+uniform sampler2D colortex0;
+uniform sampler2D depthtex0;
+uniform mat4 gbufferProjectionInverse;
+uniform mat4 gbufferModelViewInverse;
+uniform vec3 fogColor;
+uniform float far;
+uniform float frameTimeCounter;
+uniform float viewWidth;
+uniform float viewHeight;
+
+in vec2 texcoord;
+
+/* RENDERTARGETS: 0 */
+layout(location = 0) out vec4 color;
+
 // Noise and utility functions
 float hash21(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
@@ -76,85 +92,151 @@ vec3 projectAndDivide(mat4 projectionMatrix, vec3 position) {
     return homPos.xyz / homPos.w;
 }
 
-uniform sampler2D colortex0;
-uniform sampler2D depthtex0;
-uniform mat4 gbufferProjectionInverse;
-uniform mat4 gbufferModelViewInverse;
-uniform vec3 fogColor;
-uniform float far;
-uniform float frameTimeCounter;
-uniform float viewWidth;
-uniform float viewHeight;
+// 3D Hash function for volumetric noise
+float hash31(vec3 p) {
+    return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453123);
+}
 
-in vec2 texcoord;
+// 3D Value Noise
+float valueNoise3D(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    vec3 u = f * f * (3.0 - 2.0 * f);
+    
+    float a = hash31(i);
+    float b = hash31(i + vec3(1.0, 0.0, 0.0));
+    float c = hash31(i + vec3(0.0, 1.0, 0.0));
+    float d = hash31(i + vec3(1.0, 1.0, 0.0));
+    float e = hash31(i + vec3(0.0, 0.0, 1.0));
+    float f_val = hash31(i + vec3(1.0, 0.0, 1.0));
+    float g = hash31(i + vec3(0.0, 1.0, 1.0));
+    float h = hash31(i + vec3(1.0, 1.0, 1.0));
+    
+    float n0 = mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    float n1 = mix(mix(e, f_val, u.x), mix(g, h, u.x), u.y);
+    return mix(n0, n1, u.z);
+}
 
-/* RENDERTARGETS: 0 */
-layout(location = 0) out vec4 color;
+// 3D fBm for cloud structure
+float fbm3D(vec3 p, int octaves) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    float frequency = 1.0;
+    float maxAmplitude = 0.0;
+    
+    for (int i = 0; i < octaves; i++) {
+        value += amplitude * valueNoise3D(p * frequency);
+        maxAmplitude += amplitude;
+        frequency *= 2.05;
+        amplitude *= 0.52;
+    }
+    return value / maxAmplitude;
+}
 
-vec3 renderSkyCloudsSkydome(vec3 eyeVector, vec3 skyColor) {
-    // Ensure we only render upper hemisphere
-    if (eyeVector.y <= 0.0) return skyColor;
+// Cloud density function with height-based falloff
+float getCloudDensity(vec3 pos, float time) {
+    // Apply wind animation
+    vec3 windScroll = vec3(time * 0.02, 0.0, time * 0.008);
+    vec3 p = pos * 0.008 + windScroll;
     
-    // Normalize eye vector for proper cone calculation
-    eyeVector = normalize(eyeVector);
+    // Multiple octaves for natural cloud structure
+    float density = fbm3D(p, 4);
+    density += fbm3D(p * 1.5 + 21.5, 3) * 0.5;
     
-    // Planar projection: xz divided by y gives infinite plane mapping
-    // This is the mathematical trick for sky domes
-    vec2 cloudUV = eyeVector.xz / eyeVector.y;
+    // Shape the clouds with smoothstep
+    density = smoothstep(0.35, 0.75, density);
     
-    // Scale and apply animation with CLOUD_DETAIL control
-    float detailScale = mix(0.7, 2.8, CLOUD_DETAIL);
-    float timeMod = frameTimeCounter * 0.0012;
-    vec2 windSlow = vec2(timeMod, timeMod * 0.5);
-    vec2 windFast = vec2(timeMod * 2.5, timeMod * 1.2);
+    // Height-based density falloff (clouds dissipate at edges)
+    float heightGradient = smoothstep(0.0, 1.0, pos.y);
+    heightGradient *= smoothstep(2.0, 0.5, pos.y);
     
-    // Layer 1: Large cloud structure with slow movement
-    vec2 largeCloudUv = cloudUV * 0.08 * detailScale + windSlow;
-    float largeClouds = fbm2DHigh(largeCloudUv, 5);
-    largeClouds = smoothstep(0.28, 0.72, largeClouds);
+    return density * heightGradient * SKY_CLOUD_AMOUNT;
+}
+
+// Light transmission through clouds (shadow ray)
+float getLightTransmission(vec3 pos, vec3 sunDir, float time) {
+    vec3 shadowPos = pos;
+    float transmission = 1.0;
     
-    // Layer 2: Medium detail with different phase
-    vec2 mediumCloudUv = cloudUV * 0.22 * detailScale + windSlow * 0.6 + vec2(12.5, 8.3);
-    float mediumClouds = fbm2DHigh(mediumCloudUv, 4);
-    mediumClouds = smoothstep(0.32, 0.76, mediumClouds * 1.2);
+    // Sample along sun direction (short march)
+    for (int i = 0; i < 6; i++) {
+        shadowPos += sunDir * 0.3;
+        float d = getCloudDensity(shadowPos, time);
+        transmission *= exp(-d * 0.5);
+        if (transmission < 0.1) break;
+    }
     
-    // Multiplicative blending for depth
-    float cloudCover = mix(largeClouds * mediumClouds, 1.0, 0.15);
+    return transmission;
+}
+
+// Main volumetric raymarching function
+vec3 renderVolumetricClouds(vec3 rayDir, vec3 eyeVector, vec3 skyColor) {
+    if (eyeVector.y <= 0.01) return skyColor;
     
-    // Layer 3: High-frequency wisps with detail control
-    vec2 wispUv = cloudUV * 0.45 * detailScale + windFast + vec2(33.7, 19.2);
-    float wisps = fbm2D(wispUv);
-    wisps = smoothstep(0.45, 0.80, wisps);
+    vec3 rayDir_norm = normalize(rayDir);
     
-    // Combine all layers with higher base coverage
-    float totalCloud = mix(cloudCover, 1.0, wisps * 0.45);
-    totalCloud = clamp(totalCloud, 0.0, 1.0);
+    // Cloud layer boundaries (world units)
+    float cloudBase = 80.0;
+    float cloudTop = 250.0;
     
-    // Horizon fading with softer falloff for better visibility
-    float horizonFade = smoothstep(0.02, 0.40, eyeVector.y);
-    totalCloud *= horizonFade;
+    // Calculate intersection distances
+    float tBase = cloudBase / eyeVector.y;
+    float tTop = cloudTop / eyeVector.y;
     
-    // Sky gradient based on view angle
-    float zenithGradient = mix(0.2, 1.0, eyeVector.y);
+    // Clamp march range
+    float t_start = max(tBase * 0.1, 0.1);
+    float t_end = min(tTop, 500.0);
     
-    // Color grading: dramatic shadow-to-light transitions
-    vec3 darkShadow = vec3(0.04, 0.08, 0.14);
-    vec3 midTone = vec3(0.34, 0.42, 0.54);
-    vec3 brightTop = vec3(0.90, 0.90, 0.86);
+    vec4 accum = vec4(0.0);
     
-    // Interpolate through cloud density
-    vec3 cloudColor = mix(darkShadow, midTone, cloudCover);
-    cloudColor = mix(cloudColor, brightTop, wisps * 0.65);
+    // Adaptive step count based on detail slider
+    int steps = int(mix(16.0, 48.0, CLOUD_DETAIL));
+    float stepSize = (t_end - t_start) / float(steps);
     
-    // Apply amount, coverage and opacity control
-    float cloudStrength = SKY_CLOUD_AMOUNT;
-    float coverage = totalCloud * mix(0.3, 1.0, CLOUD_OPACITY) * cloudStrength;
-    vec3 result = mix(skyColor, cloudColor, coverage);
+    // Dithering for better quality with fewer steps
+    float dither = fract(sin(dot(eyeVector.xy, vec2(12.9898, 78.233))) * 43758.5453);
     
-    // Subtle brightening at high altitude
-    result = mix(result, vec3(0.84, 0.88, 0.92), wisps * 0.12 * zenithGradient);
+    vec3 sunDir = normalize(vec3(1.0, 0.8, 0.3)); // Approximate sun direction
     
-    return result;
+    for (int i = 0; i < steps; i++) {
+        // Jittered sampling
+        float t = t_start + (float(i) + dither * 0.5) * stepSize;
+        vec3 pos = eyeVector * t;
+        
+        // Ensure position is within reasonable bounds
+        if (pos.y < cloudBase * 0.5 || pos.y > cloudTop * 2.0) continue;
+        
+        // Sample cloud density at this position
+        float density = getCloudDensity(pos, frameTimeCounter);
+        
+        if (density > 0.001) {
+            // Calculate light transmission through cloud
+            float lightTrans = getLightTransmission(pos, sunDir, frameTimeCounter);
+            
+            // Cloud coloring based on height and light
+            vec3 cloudCol = mix(vec3(0.1, 0.15, 0.25), vec3(1.0, 0.95, 0.85), lightTrans * 0.8);
+            cloudCol = mix(cloudCol, vec3(0.95), density * 0.3); // Brighten thick clouds
+            
+            // Front-to-back alpha blending
+            float alpha = density * mix(0.5, 1.0, CLOUD_OPACITY) * stepSize;
+            accum.rgb += (1.0 - accum.a) * cloudCol * alpha;
+            accum.a += (1.0 - accum.a) * alpha;
+        }
+        
+        // Early termination for performance
+        if (accum.a >= 0.95) break;
+    }
+    
+    // Blend volumetric clouds over sky
+    return mix(skyColor, accum.rgb, accum.a);
+}
+
+vec3 renderSkyClouds(vec3 eyeVector, vec3 skyColor) {
+    // Use volumetric raymarching for 3D clouds
+    if (eyeVector.y <= 0.01) return skyColor;
+    
+    // Simple estimate of ray direction (could be more accurate)
+    return renderVolumetricClouds(eyeVector, eyeVector, skyColor);
 }
 
 void main() {
@@ -171,7 +253,7 @@ void main() {
         vec3 skyHaze = mix(pow(fogColor, vec3(2.2)), vec3(0.55, 0.70, 0.62), 0.22 * STYLE_STRENGTH);
         color.rgb = mix(color.rgb, skyHaze, horizon * 0.18 * ATMOSPHERE_STRENGTH);
 #ifdef SKY_CLOUDS
-        color.rgb = renderSkyCloudsSkydome(eyeVector, color.rgb);
+        color.rgb = renderSkyClouds(eyeVector, color.rgb);
 #endif
         return;
     }
